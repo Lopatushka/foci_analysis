@@ -6,6 +6,14 @@ from ij.process import AutoThresholder
 import os
 import csv
 
+def pick_image():
+	imp = IJ.getImage()
+	if imp is None:
+	    IJ.error("No image open.")
+	    raise SystemExit
+	image_name = imp.getTitle()
+	return (imp, image_name)
+	
 def find_dapi_imp(imps, selector):
     """
     selector can be:
@@ -17,7 +25,6 @@ def find_dapi_imp(imps, selector):
     return None
 
 # ---------- Main ----------
-
 # Global values
 dapi_selector = 1 # The DAPI channel is number 1
 thr_method = "Triangle"
@@ -28,14 +35,10 @@ working_channel = "C2"
 # Choose folder to select results
 output_dir = IJ.getDirectory("Choose a directory to save data.")
 
+#---------- Nuclei segmentation ----------
 # Take an opened image and get its name
-imp = IJ.getImage()
-image_name = imp.getTitle()
+imp, image_name = pick_image()
 
-if imp is None:
-    IJ.error("No image open.")
-    raise SystemExit
-    
 # Split channels into separate grayscale images
 IJ.run(imp, "Split Channels", "")
 
@@ -132,7 +135,7 @@ else:
     mask_particles.show()
     mask_particles.updateAndDraw()
 
-    # Save it
+    # Save nuclei mask
     mask_path = os.path.join(output_dir, "{}_nuclei_mask.tif".format(image_name[:-4]))
     IJ.save(mask_particles, mask_path)
 
@@ -147,3 +150,34 @@ if ids:
         if working_channel not in title:
         	imp.changes = False
         	imp.close()
+        	
+# Measure Area and Mean intensity of the nuclei
+# Take an opened image and get its name
+imp, image_name = pick_image()
+
+# Work with ROI manager
+if rm is None or rm.getCount() == 0:
+    IJ.error("ROI Manager is empty.")
+else:
+	# Set what to measure (Area + Mean)
+    # redirect=None => measure on the current image (imp)
+    IJ.run("Set Measurements...", "area mean redirect=None decimal=3")
+
+    # Clear old Results table (optional but recommended)
+    IJ.run("Clear Results", "")
+
+    # Measure all ROIs on this image -> fills Results table
+    rm.runCommand(imp, "Measure")
+
+    # Save Results table to CSV
+    results_nuclei_path = os.path.join(output_dir, "{}_roi_area_mean.csv".format(image_name[:-4]))
+    IJ.saveAs("Results", results_nuclei_path)
+    
+    # Close table with results
+    w = WindowManager.getWindow("Results")
+    if w is not None:
+    	w.dispose()
+
+
+#---------- Foci segmentation ----------
+
