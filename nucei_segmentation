@@ -6,42 +6,70 @@ from ij.process import AutoThresholder
 import os
 import csv
 
-# ---------------- parameters ----------------
+# ============================================================
+# PARAMETERS (edit these)
+# ============================================================
 
-DAPI_CHANNEL = 1          
-MEASURE_CHANNEL = 2       
-thr_method = "Triangle"
-min_area = 200
-max_area = None            
-min_circularity = 0.4
-max_circularity = 1.0
+DAPI_CHANNEL = 1	     # 1-based channel index for DAPI (after Split Channels): C1 = 1, C2 = 2, ...          
+MEASURE_CHANNEL = 2	     # 1-based channel index to measure mean intensity from (e.g., C2)       
+thr_method = "Triangle"	 # Auto-threshold method for DAPI segmentation (e.g., Otsu, Triangle, Huang, ...)
+min_area = 200	         # Minimum nucleus area in pixels^2
+max_area = None	         # Maximum nucleus area in pixels^2 (None/0 => no max)            
+min_circularity = 0.2	 # Min circularity filter for nuclei (0..1)
+max_circularity = 1.0	 # Max circularity filter for nuclei (0..1)
+output_dir = None		 # Directory to save results
 
-#---------------------------------------------
+# ============================================================
+# FUNCTIONS
+# ============================================================
 
-# ---------------- Functions ----------------
 def get_active_image():
+    """
+    Returns the currently active ImagePlus in Fiji.
+    Stops the script if no image is open.
+    """
     imp = IJ.getImage()
+
+    #if imp is None:
+        #imp = WindowManager.getCurrentImage()
+
     if imp is None:
-        IJ.error("No image open.")
+        IJ.error("No active image found.")
         raise SystemExit
+
     return imp
     
 def base_name(title):
-    # Safe for .tif/.tiff/.png/anything
+    """
+    Removes the file extension from the image title safely.
+    Example: 'cell1.tif' -> 'cell1'
+    """
     return os.path.splitext(title)[0]
     
 def ensure_roi_manager(reset=True):
-    rm = RoiManager.getInstance()
-    if rm is None:
-        rm = RoiManager()
-    if reset:
-        rm.reset()
-    return rm
+	"""
+    Gets the ROI Manager instance.
+    Optionally resets it to avoid mixing old ROIs with new ones.
+    """
+	rm = RoiManager.getInstance()
+	if rm is None:
+		rm = RoiManager()
+	if reset:
+		rm.reset()
+	return rm
 
 def split_channels(imp):
-    """Run Split Channels and return list of split channel ImagePlus that belong to imp."""
+    """
+    Runs ImageJ command 'Split Channels' on the input image.
+    Returns a list of split channel ImagePlus objects that belong to the original image.
+    The list is sorted as [C1, C2, C3, ...].
+    """
     orig_title = imp.getTitle()
+    
+    # Split channels: creates new windows like "C1-<orig_title>", "C2-<orig_title>", ...
     IJ.run(imp, "Split Channels", "")
+    
+    # Get all currently opened image window IDs
     ids = WindowManager.getIDList()
     if not ids:
         IJ.error("No windows after Split Channels.")
@@ -53,7 +81,7 @@ def split_channels(imp):
         if wimp is None:
             continue
         title = wimp.getTitle()
-        # Typical Split Channels names: C1-<orig>, C2-<orig>, ...
+        # Keep only windows that look like split channels of THIS image
         if title.startswith("C") and "-" in title and (orig_title in title):
             split_imps.append(wimp)
 
@@ -73,15 +101,24 @@ def split_channels(imp):
     return split_imps
 
 def pick_channel_by_index(split_imps, one_based_index):
-    idx = int(one_based_index) - 1
-    if idx < 0 or idx >= len(split_imps):
-        return None
-    return split_imps[idx]
+	"""
+    Picks a channel ImagePlus from split_imps using 1-based indexing.
+    Example: one_based_index=1 -> C1
+    """
+	idx = int(one_based_index) - 1
+	if idx < 0 or idx >= len(split_imps):
+		return None
+	return split_imps[idx]
     
 def close_all_images_except(keep_imp):
+    """
+    Closes all image windows except keep_imp.
+    'changes=False' prevents 'Save changes?' dialogs.
+    """
     ids = WindowManager.getIDList()
     if not ids:
         return
+
     for wid in ids:
         imp = WindowManager.getImage(wid)
         if imp is None:
@@ -89,36 +126,33 @@ def close_all_images_except(keep_imp):
         if imp != keep_imp:
             imp.changes = False
             imp.close()
+
             
 def close_results_table():
-    w = WindowManager.getWindow("Results")
-    if w is None:
-        return
-    w.dispose()
+	"""
+    Closes the standard ImageJ 'Results' table window if it exists.
+    Uses dispose() because Results is usually a Swing window.
+    """
+	w = WindowManager.getWindow("Results")
+	if w is None:
+		return
+	w.dispose()
     
-def close_non_image_windows():
-    wins = WindowManager.getNonImageWindows()
-    for w in wins:
-        try:
-            w.dispose()
-        except:
-            try:
-                w.close()
-            except:
-                try:
-                    w.setVisible(False)
-                except:
-                    pass
 
 def build_mask_from_rois(reference_imp, rm):
-    """Create an 8-bit mask image filled with ROI shapes (255 inside)."""
+    """
+    Creates an 8-bit mask image where pixels inside each ROI are filled with 255 (white),
+    and background is 0 (black).
+    This produces a 'particles-only' mask based on the ROIs that passed Analyze Particles.
+    """
     w = reference_imp.getWidth()
     h = reference_imp.getHeight()
 
     mask = IJ.createImage("Nuclei_mask_particles_only", "8-bit black", w, h, 1)
     ip = mask.getProcessor()
-    ip.setValue(255)
-
+    ip.setValue(255)	# fill value (white)
+    
+ 	# Fill each ROI into the mask
     for i in range(rm.getCount()):
         roi = rm.getRoi(i)
         mask.setRoi(roi)
@@ -126,27 +160,32 @@ def build_mask_from_rois(reference_imp, rm):
 
     mask.killRoi()
     return mask
-#---------------------------------------------
+    
+# ============================================================
+# MAIN
+# ============================================================
 
-# ---------------- Main ----------------
+# Ask user where to save outputs
 output_dir = IJ.getDirectory("Choose a directory to save data.")
 if output_dir is None:
     IJ.error("No output directory selected.")
     raise SystemExit
 
-# Get active image
+# Get the currently active image (multichannel)
 imp = get_active_image()
 img_title = imp.getTitle()
 img_base = base_name(img_title)
 
-# ROI Manager (reset to avoid mixing old ROIs)
+# Initialize/reset ROI Manager so we start clean
 rm = ensure_roi_manager(reset=True)
 
-# Split channels
+# Split channels into separate images (C1, C2, ...)
 split_imps = split_channels(imp)
 
-# Pick DAPI and measurement channel
+# Select DAPI channel image (used for nuclei segmentation)
 dapi_imp = pick_channel_by_index(split_imps, DAPI_CHANNEL)
+
+# Select the measurement channel image (used for mean intensity measurement)
 meas_imp = pick_channel_by_index(split_imps, MEASURE_CHANNEL)
 
 if dapi_imp is None:
@@ -156,21 +195,38 @@ if meas_imp is None:
     IJ.error("Cannot pick measurement channel {}. Check number of channels.".format(MEASURE_CHANNEL))
     raise SystemExit
     
-# --- nuclei segmentation on DAPI ---
+# ------------------------------------------------------------
+# 1) NUCLEI SEGMENTATION ON DAPI
+# ------------------------------------------------------------
+
+# Work on a duplicate so we don’t modify the original DAPI channel image
 dapi_work = dapi_imp.duplicate()
 dapi_work.setTitle("DAPI_work")
 dapi_work.show()
 
+# Preprocessing: helps reduce uneven background and noise
 IJ.run(dapi_work, "Subtract Background...", "rolling=50")
 IJ.run(dapi_work, "Gaussian Blur...", "sigma=1")
 
+# Thresholding: create a binary mask from the DAPI channel
+# "{} dark" assumes nuclei are bright on a dark background
 IJ.setAutoThreshold(dapi_work, "{} dark".format(thr_method))
 IJ.run(dapi_work, "Convert to Mask", "")
+
+# Post-processing: fill holes inside nuclei
 IJ.run(dapi_work, "Fill Holes", "")
 
-# Particle analysis -> ROIs into ROI Manager
+# ------------------------------------------------------------
+# 2) ANALYZE PARTICLES -> ROIs IN ROI MANAGER
+# ------------------------------------------------------------
+
+# ParticleAnalyzer:
+# - ADD_TO_MANAGER adds each detected particle as an ROI
+# - measurements only used during detection (we’ll measure on C2 later)
 options = ParticleAnalyzer.ADD_TO_MANAGER
 measurements = Measurements.AREA
+
+# If your Fiji throws an error here, switch to IJ.run("Analyze Particles...", ...) instead.
 pa = ParticleAnalyzer(options, measurements, None,
                       float(min_area),
                       (float(max_area) if max_area and max_area > 0 else float("inf")),
@@ -185,7 +241,10 @@ if rm.getCount() == 0:
     IJ.error("No nuclei found (ROI Manager empty). Check threshold/morphology/min_area.")
     raise SystemExit
 
-# Save mask of accepted particles only (from ROIs)
+# ------------------------------------------------------------
+# 3) SAVE MASK OF ACCEPTED NUCLEI (ROIs-ONLY MASK)
+# ------------------------------------------------------------
+
 mask_particles = build_mask_from_rois(dapi_work, rm)
 mask_particles.show()
 mask_particles.updateAndDraw()
@@ -193,21 +252,38 @@ mask_particles.updateAndDraw()
 mask_path = os.path.join(output_dir, "{}_nuclei_mask.tif".format(img_base))
 IJ.save(mask_particles, mask_path)
 
-# --- mean intensity from nuclei and area---
-# Close everything except measurement channel (optional)
+# ------------------------------------------------------------
+# 4) MEASURE AREA + MEAN INTENSITY ON CHANNEL 2 FOR THESE ROIs
+# ------------------------------------------------------------
+
+# Close everything except the measurement channel to reduce confusion/state
 close_all_images_except(meas_imp)
 
-# Get active image
+# Ensure measurement channel is active (important for consistent measurements)
 imp = get_active_image()
 img_title = imp.getTitle()
 img_base = base_name(img_title)
+
 print("Processing the image: {}".format(img_title))
 
-# Set measurements: Area + Mean on current image
+# Set measurements for the Results table:
+# - area + mean intensity
+# - NO redirect (redirect settings can break on repeated runs)
 IJ.run("Set Measurements...", "area mean redirect=None decimal=3")
+
+# Clear old results so you only keep this run
 IJ.run("Clear Results", "")
+
+# Measure all ROIs on meas_imp -> fills the standard Results table
 rm.runCommand(meas_imp, "Measure")
 
+# Save Results as CSV
 results_path = os.path.join(output_dir, "{}_C2_roi_area_mean.csv".format(img_base))
 IJ.saveAs("Results", results_path)
+
+# Close Results window (optional)
 close_results_table()
+
+
+
+print("Done!")
