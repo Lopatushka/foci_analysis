@@ -1,183 +1,213 @@
 from ij import IJ, WindowManager
 from ij.plugin.frame import RoiManager
-from ij.measure import Measurements
+from ij.measure import Measurements, ResultsTable
 from ij.plugin.filter import ParticleAnalyzer
 from ij.process import AutoThresholder
 import os
 import csv
 
-def pick_image():
-	imp = IJ.getImage()
-	if imp is None:
-	    IJ.error("No image open.")
-	    raise SystemExit
-	image_name = imp.getTitle()
-	return (imp, image_name)
-	
-def find_dapi_imp(imps, selector):
-    """
-    selector can be:
-    "1" / "2" / ... : channel index from Split Channels result order
-    """
-    idx = int(selector) - 1
-    if 0 <= idx < len(imps):
-    	return imps[idx]
-    return None
+# ---------------- parameters ----------------
 
-# ---------- Main ----------
-# Global values
-dapi_selector = 1 # The DAPI channel is number 1
+DAPI_CHANNEL = 1          
+MEASURE_CHANNEL = 2       
 thr_method = "Triangle"
-min_area = 200 # minimal nucleus area
-max_area = None # maximal nucleus area
-working_channel = "C2"
+min_area = 200
+max_area = None            
+min_circularity = 0.4
+max_circularity = 1.0
 
-# Choose folder to select results
-output_dir = IJ.getDirectory("Choose a directory to save data.")
+#---------------------------------------------
 
-#---------- Nuclei segmentation ----------
-# Take an opened image and get its name
-imp, image_name = pick_image()
-
-# Split channels into separate grayscale images
-IJ.run(imp, "Split Channels", "")
-
-# Collect channel images produced by Split Channels. They are usually named like "C1-<title>", "C2-<title>", ...
-all_ids = WindowManager.getIDList()
-if all_ids is None:
-    IJ.error("No windows after Split Channels.")
-    raise SystemExit
-
-# Take only images that look like split-channel windows for this source image.
-# We'll match by containing the original title.
-orig_title = imp.getTitle()
-split_imps = []
-for wid in all_ids:
-    wimp = WindowManager.getImage(wid)
-    if wimp is None:
-        continue
-    title = wimp.getTitle()
-    # Heuristic: split channels usually have "C1-" or "C2-" prefix
-    if (title.startswith("C") and "-" in title) and (orig_title in title):
-        split_imps.append(wimp)
-        
-if len(split_imps) == 0:
-    IJ.error("Could not find split channel images. Try running on a composite/multichannel image.")
-    raise SystemExit
-
-# Pick DAPI channel
-dapi_imp = find_dapi_imp(split_imps, dapi_selector)
-if dapi_imp is None:
-    msg = "Could not identify DAPI channel. Try setting 'dapi_selector' to a number (1,2,3...)."
-    IJ.error(msg)
-    raise SystemExit
+# ---------------- Functions ----------------
+def get_active_image():
+    imp = IJ.getImage()
+    if imp is None:
+        IJ.error("No image open.")
+        raise SystemExit
+    return imp
     
-# Pick DAPI channel
-dapi_imp = find_dapi_imp(split_imps, dapi_selector)
-if dapi_imp is None:
-    msg = "Could not identify DAPI channel. Try setting 'dapi_selector' to a number (1,2,3...)"
-    IJ.error(msg)
-    raise SystemExit
+def base_name(title):
+    # Safe for .tif/.tiff/.png/anything
+    return os.path.splitext(title)[0]
     
-# Prepare ROI Manager
-rm = RoiManager.getInstance()
+def ensure_roi_manager(reset=True):
+    rm = RoiManager.getInstance()
+    if rm is None:
+        rm = RoiManager()
+    if reset:
+        rm.reset()
+    return rm
 
-# Work on a duplicate of DAPI channel
-dapi_work = dapi_imp.duplicate()
-dapi_work.setTitle("DAPI_work")
-dapi_work.show()
+def split_channels(imp):
+    """Run Split Channels and return list of split channel ImagePlus that belong to imp."""
+    orig_title = imp.getTitle()
+    IJ.run(imp, "Split Channels", "")
+    ids = WindowManager.getIDList()
+    if not ids:
+        IJ.error("No windows after Split Channels.")
+        raise SystemExit
 
-# Preprocessing
-IJ.run(dapi_work, "Subtract Background...", "rolling=50")   # adjust if needed
-IJ.run(dapi_work, "Gaussian Blur...", "sigma=1")            # mild smoothing
+    split_imps = []
+    for wid in ids:
+        wimp = WindowManager.getImage(wid)
+        if wimp is None:
+            continue
+        title = wimp.getTitle()
+        # Typical Split Channels names: C1-<orig>, C2-<orig>, ...
+        if title.startswith("C") and "-" in title and (orig_title in title):
+            split_imps.append(wimp)
 
-# Threshold + convert to mask
-# Ensure dark background assumption; if inverted, flip the logic by inverting image first.
-IJ.setAutoThreshold(dapi_work, "{} dark".format(thr_method))
-IJ.run(dapi_work, "Convert to Mask", "")
+    if len(split_imps) == 0:
+        IJ.error("Could not find split channel images. Make sure your image is multichannel/composite.")
+        raise SystemExit
 
-# Clean mask
-IJ.run(dapi_work, "Fill Holes", "")
-#IJ.run(dapi_work, "Open", "")  # morphological open (removes small specks)
+    # Sort by channel number: C1, C2, C3...
+    def chan_index(t):
+        # expects "C2-..." -> 2
+        try:
+            return int(t.split("-")[0][1:])
+        except:
+            return 999
+    split_imps.sort(key=lambda im: chan_index(im.getTitle()))
 
-# Particle analysis -> ROIs in ROI Manager
-options = ParticleAnalyzer.ADD_TO_MANAGER | ParticleAnalyzer.EXCLUDE_EDGE_PARTICLES
-measurements = Measurements.AREA | Measurements.MEAN
-pa = ParticleAnalyzer(options, measurements, None,
-                      min_area,
-                      (max_area if max_area and max_area > 0 else float("inf")))
-                      
-ok = pa.analyze(dapi_work)
-if not ok:
-    IJ.log("ParticleAnalyzer returned False (no particles or error).")
+    return split_imps
 
-# Save the particle mask
-rm = RoiManager.getInstance()
-count = rm.getCount()
-if count == 0:
-    IJ.error("ROI Manager is empty — nothing to make a mask from.")
-else:
-    w = dapi_work.getWidth()
-    h = dapi_work.getHeight()
+def pick_channel_by_index(split_imps, one_based_index):
+    idx = int(one_based_index) - 1
+    if idx < 0 or idx >= len(split_imps):
+        return None
+    return split_imps[idx]
     
-    # Create empty 8-bit mask (black)
-    mask_particles = IJ.createImage("Nuclei_mask_particles_only", "8-bit black", w, h, 1)
-    ip = mask_particles.getProcessor()
-    ip.setValue(255)  # white
-
-    # Fill each ROI in the mask
-    for i in range(count):
-        roi = rm.getRoi(i)
-        mask_particles.setRoi(roi)
-        ip.fill(mask_particles.getRoi())
-
-    mask_particles.killRoi()
-    mask_particles.show()
-    mask_particles.updateAndDraw()
-
-    # Save nuclei mask
-    mask_path = os.path.join(output_dir, "{}_nuclei_mask.tif".format(image_name[:-4]))
-    IJ.save(mask_particles, mask_path)
-
-# Close all windows except the working channel
-ids = WindowManager.getIDList()
-if ids:
+def close_all_images_except(keep_imp):
+    ids = WindowManager.getIDList()
+    if not ids:
+        return
     for wid in ids:
         imp = WindowManager.getImage(wid)
         if imp is None:
             continue
-        title = imp.getTitle()
-        if working_channel not in title:
-        	imp.changes = False
-        	imp.close()
-        	
-# Measure Area and Mean intensity of the nuclei
-# Take an opened image and get its name
-imp, image_name = pick_image()
-
-# Work with ROI manager
-if rm is None or rm.getCount() == 0:
-    IJ.error("ROI Manager is empty.")
-else:
-	# Set what to measure (Area + Mean)
-    # redirect=None => measure on the current image (imp)
-    IJ.run("Set Measurements...", "area mean redirect=None decimal=3")
-
-    # Clear old Results table (optional but recommended)
-    IJ.run("Clear Results", "")
-
-    # Measure all ROIs on this image -> fills Results table
-    rm.runCommand(imp, "Measure")
-
-    # Save Results table to CSV
-    results_nuclei_path = os.path.join(output_dir, "{}_roi_area_mean.csv".format(image_name[:-4]))
-    IJ.saveAs("Results", results_nuclei_path)
-    
-    # Close table with results
+        if imp != keep_imp:
+            imp.changes = False
+            imp.close()
+            
+def close_results_table():
     w = WindowManager.getWindow("Results")
-    if w is not None:
-    	w.dispose()
+    if w is None:
+        return
+    w.dispose()
+    
+def close_non_image_windows():
+    wins = WindowManager.getNonImageWindows()
+    for w in wins:
+        try:
+            w.dispose()
+        except:
+            try:
+                w.close()
+            except:
+                try:
+                    w.setVisible(False)
+                except:
+                    pass
 
+def build_mask_from_rois(reference_imp, rm):
+    """Create an 8-bit mask image filled with ROI shapes (255 inside)."""
+    w = reference_imp.getWidth()
+    h = reference_imp.getHeight()
 
-#---------- Foci segmentation ----------
+    mask = IJ.createImage("Nuclei_mask_particles_only", "8-bit black", w, h, 1)
+    ip = mask.getProcessor()
+    ip.setValue(255)
 
+    for i in range(rm.getCount()):
+        roi = rm.getRoi(i)
+        mask.setRoi(roi)
+        ip.fill(mask.getRoi())
+
+    mask.killRoi()
+    return mask
+#---------------------------------------------
+
+# ---------------- Main ----------------
+output_dir = IJ.getDirectory("Choose a directory to save data.")
+if output_dir is None:
+    IJ.error("No output directory selected.")
+    raise SystemExit
+
+# Get active image
+imp = get_active_image()
+img_title = imp.getTitle()
+img_base = base_name(img_title)
+
+# ROI Manager (reset to avoid mixing old ROIs)
+rm = ensure_roi_manager(reset=True)
+
+# Split channels
+split_imps = split_channels(imp)
+
+# Pick DAPI and measurement channel
+dapi_imp = pick_channel_by_index(split_imps, DAPI_CHANNEL)
+meas_imp = pick_channel_by_index(split_imps, MEASURE_CHANNEL)
+
+if dapi_imp is None:
+    IJ.error("Cannot pick DAPI channel {}. Check number of channels.".format(DAPI_CHANNEL))
+    raise SystemExit
+if meas_imp is None:
+    IJ.error("Cannot pick measurement channel {}. Check number of channels.".format(MEASURE_CHANNEL))
+    raise SystemExit
+    
+# --- nuclei segmentation on DAPI ---
+dapi_work = dapi_imp.duplicate()
+dapi_work.setTitle("DAPI_work")
+dapi_work.show()
+
+IJ.run(dapi_work, "Subtract Background...", "rolling=50")
+IJ.run(dapi_work, "Gaussian Blur...", "sigma=1")
+
+IJ.setAutoThreshold(dapi_work, "{} dark".format(thr_method))
+IJ.run(dapi_work, "Convert to Mask", "")
+IJ.run(dapi_work, "Fill Holes", "")
+
+# Particle analysis -> ROIs into ROI Manager
+options = ParticleAnalyzer.ADD_TO_MANAGER
+measurements = Measurements.AREA
+pa = ParticleAnalyzer(options, measurements, None,
+                      float(min_area),
+                      (float(max_area) if max_area and max_area > 0 else float("inf")),
+                      min_circularity, max_circularity)
+
+ok = pa.analyze(dapi_work)
+if not ok:
+    IJ.error("ParticleAnalyzer returned False (no particles or error).")
+    raise SystemExit
+
+if rm.getCount() == 0:
+    IJ.error("No nuclei found (ROI Manager empty). Check threshold/morphology/min_area.")
+    raise SystemExit
+
+# Save mask of accepted particles only (from ROIs)
+mask_particles = build_mask_from_rois(dapi_work, rm)
+mask_particles.show()
+mask_particles.updateAndDraw()
+
+mask_path = os.path.join(output_dir, "{}_nuclei_mask.tif".format(img_base))
+IJ.save(mask_particles, mask_path)
+
+# --- mean intensity from nuclei and area---
+# Close everything except measurement channel (optional)
+close_all_images_except(meas_imp)
+
+# Get active image
+imp = get_active_image()
+img_title = imp.getTitle()
+img_base = base_name(img_title)
+print("Processing the image: {}".format(img_title))
+
+# Set measurements: Area + Mean on current image
+IJ.run("Set Measurements...", "area mean redirect=None decimal=3")
+IJ.run("Clear Results", "")
+rm.runCommand(meas_imp, "Measure")
+
+results_path = os.path.join(output_dir, "{}_C2_roi_area_mean.csv".format(img_base))
+IJ.saveAs("Results", results_path)
+close_results_table()
