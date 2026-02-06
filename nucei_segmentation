@@ -3,6 +3,8 @@ from ij.plugin.frame import RoiManager
 from ij.measure import Measurements
 from ij.plugin.filter import ParticleAnalyzer
 from ij.process import AutoThresholder
+import os
+import csv
 
 def find_dapi_imp(imps, selector):
     """
@@ -21,11 +23,15 @@ dapi_selector = 1 # The DAPI channel is number 1
 thr_method = "Triangle"
 min_area = 200 # minimal nucleus area
 max_area = None # maximal nucleus area
-#show_mask = True # show intermidiate DAPI mask
 working_channel = "C2"
 
-# Take an opened image
+# Choose folder to select results
+output_dir = IJ.getDirectory("Choose a directory to save data.")
+
+# Take an opened image and get its name
 imp = IJ.getImage()
+image_name = imp.getTitle()
+
 if imp is None:
     IJ.error("No image open.")
     raise SystemExit
@@ -102,7 +108,35 @@ ok = pa.analyze(dapi_work)
 if not ok:
     IJ.log("ParticleAnalyzer returned False (no particles or error).")
 
-# Close all windows except the desired channel
+# Save the particle mask
+rm = RoiManager.getInstance()
+count = rm.getCount()
+if count == 0:
+    IJ.error("ROI Manager is empty — nothing to make a mask from.")
+else:
+    w = dapi_work.getWidth()
+    h = dapi_work.getHeight()
+    
+    # Create empty 8-bit mask (black)
+    mask_particles = IJ.createImage("Nuclei_mask_particles_only", "8-bit black", w, h, 1)
+    ip = mask_particles.getProcessor()
+    ip.setValue(255)  # white
+
+    # Fill each ROI in the mask
+    for i in range(count):
+        roi = rm.getRoi(i)
+        mask_particles.setRoi(roi)
+        ip.fill(mask_particles.getRoi())
+
+    mask_particles.killRoi()
+    mask_particles.show()
+    mask_particles.updateAndDraw()
+
+    # Save it
+    mask_path = os.path.join(output_dir, "{}_nuclei_mask.tif".format(image_name[:-4]))
+    IJ.save(mask_particles, mask_path)
+
+# Close all windows except the working channel
 ids = WindowManager.getIDList()
 if ids:
     for wid in ids:
@@ -111,4 +145,5 @@ if ids:
             continue
         title = imp.getTitle()
         if working_channel not in title:
-            imp.close()
+        	imp.changes = False
+        	imp.close()
