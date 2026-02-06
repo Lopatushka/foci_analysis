@@ -1,3 +1,16 @@
+#@ Integer(label="DAPI channel (1-based)", value=1) DAPI_CHANNEL
+#@ Integer(label="Measurement channel (1-based)", value=2) MEASURE_CHANNEL
+#@ String(label="Threshold method (e.g. Triangle, Otsu, Huang)", value="Triangle") thr_method
+#@ Float(label="Min nucleus area (pixels^2)", value=200.0) min_area
+#@ Float(label="Max nucleus area (pixels^2) (0 = no max)", value=0.0) max_area
+#@ Float(label="Min circularity (0..1)", value=0.2) min_circularity
+#@ Float(label="Max circularity (0..1)", value=1.0) max_circularity
+#@ Boolean(label="Exclude edge particles", value=True) exclude_edges
+
+
+# ============================================================
+# PACKAGES IMPORT
+# ============================================================
 from ij import IJ, WindowManager
 from ij.plugin.frame import RoiManager
 from ij.measure import Measurements, ResultsTable
@@ -10,14 +23,15 @@ import csv
 # PARAMETERS (edit these)
 # ============================================================
 
-DAPI_CHANNEL = 1	     # 1-based channel index for DAPI (after Split Channels): C1 = 1, C2 = 2, ...          
-MEASURE_CHANNEL = 2	     # 1-based channel index to measure mean intensity from (e.g., C2)       
-thr_method = "Triangle"	 # Auto-threshold method for DAPI segmentation (e.g., Otsu, Triangle, Huang, ...)
-min_area = 200	         # Minimum nucleus area in pixels^2
-max_area = None	         # Maximum nucleus area in pixels^2 (None/0 => no max)            
-min_circularity = 0.2	 # Min circularity filter for nuclei (0..1)
-max_circularity = 1.0	 # Max circularity filter for nuclei (0..1)
-output_dir = None		 # Directory to save results
+#DAPI_CHANNEL = 1	     # 1-based channel index for DAPI (after Split Channels): C1 = 1, C2 = 2, ...          
+#MEASURE_CHANNEL = 2	     # 1-based channel index to measure mean intensity from (e.g., C2)       
+#thr_method = "Triangle"	 # Auto-threshold method for DAPI segmentation (e.g., Otsu, Triangle, Huang, ...)
+#min_area = 200	         # Minimum nucleus area in pixels^2
+#max_area = None	         # Maximum nucleus area in pixels^2 (None/0 => no max)            
+#min_circularity = 0.2	 # Min circularity filter for nuclei (0..1)
+#max_circularity = 1.0	 # Max circularity filter for nuclei (0..1)
+#exclude_edges = True	 # True = exclude edge particles, False = keep them
+#output_dir = "D:/test"	 # Directory to save results
 
 # ============================================================
 # FUNCTIONS
@@ -166,7 +180,8 @@ def build_mask_from_rois(reference_imp, rm):
 # ============================================================
 
 # Ask user where to save outputs
-output_dir = IJ.getDirectory("Choose a directory to save data.")
+output_dir = IJ.getDirectory("Choose a directory to save data")
+
 if output_dir is None:
     IJ.error("No output directory selected.")
     raise SystemExit
@@ -224,6 +239,10 @@ IJ.run(dapi_work, "Fill Holes", "")
 # - ADD_TO_MANAGER adds each detected particle as an ROI
 # - measurements only used during detection (we’ll measure on C2 later)
 options = ParticleAnalyzer.ADD_TO_MANAGER
+
+if exclude_edges:
+    options |= ParticleAnalyzer.EXCLUDE_EDGE_PARTICLES
+    
 measurements = Measurements.AREA
 
 # If your Fiji throws an error here, switch to IJ.run("Analyze Particles...", ...) instead.
@@ -283,7 +302,5 @@ IJ.saveAs("Results", results_path)
 
 # Close Results window (optional)
 close_results_table()
-
-
 
 print("Done!")
