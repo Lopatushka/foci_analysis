@@ -1,0 +1,114 @@
+from ij import IJ, WindowManager
+from ij.plugin.frame import RoiManager
+from ij.measure import Measurements
+from ij.plugin.filter import ParticleAnalyzer
+from ij.process import AutoThresholder
+
+def find_dapi_imp(imps, selector):
+    """
+    selector can be:
+    "1" / "2" / ... : channel index from Split Channels result order
+    """
+    idx = int(selector) - 1
+    if 0 <= idx < len(imps):
+    	return imps[idx]
+    return None
+
+# ---------- Main ----------
+
+# Global values
+dapi_selector = 1 # The DAPI channel is number 1
+thr_method = "Triangle"
+min_area = 200 # minimal nucleus area
+max_area = None # maximal nucleus area
+#show_mask = True # show intermidiate DAPI mask
+working_channel = "C2"
+
+# Take an opened image
+imp = IJ.getImage()
+if imp is None:
+    IJ.error("No image open.")
+    raise SystemExit
+    
+# Split channels into separate grayscale images
+IJ.run(imp, "Split Channels", "")
+
+# Collect channel images produced by Split Channels. They are usually named like "C1-<title>", "C2-<title>", ...
+all_ids = WindowManager.getIDList()
+if all_ids is None:
+    IJ.error("No windows after Split Channels.")
+    raise SystemExit
+
+# Take only images that look like split-channel windows for this source image.
+# We'll match by containing the original title.
+orig_title = imp.getTitle()
+split_imps = []
+for wid in all_ids:
+    wimp = WindowManager.getImage(wid)
+    if wimp is None:
+        continue
+    title = wimp.getTitle()
+    # Heuristic: split channels usually have "C1-" or "C2-" prefix
+    if (title.startswith("C") and "-" in title) and (orig_title in title):
+        split_imps.append(wimp)
+        
+if len(split_imps) == 0:
+    IJ.error("Could not find split channel images. Try running on a composite/multichannel image.")
+    raise SystemExit
+
+# Pick DAPI channel
+dapi_imp = find_dapi_imp(split_imps, dapi_selector)
+if dapi_imp is None:
+    msg = "Could not identify DAPI channel. Try setting 'dapi_selector' to a number (1,2,3...)."
+    IJ.error(msg)
+    raise SystemExit
+    
+# Pick DAPI channel
+dapi_imp = find_dapi_imp(split_imps, dapi_selector)
+if dapi_imp is None:
+    msg = "Could not identify DAPI channel. Try setting 'dapi_selector' to a number (1,2,3...)"
+    IJ.error(msg)
+    raise SystemExit
+    
+# Prepare ROI Manager
+rm = RoiManager.getInstance()
+
+# Work on a duplicate of DAPI channel
+dapi_work = dapi_imp.duplicate()
+dapi_work.setTitle("DAPI_work")
+dapi_work.show()
+
+# Preprocessing
+IJ.run(dapi_work, "Subtract Background...", "rolling=50")   # adjust if needed
+IJ.run(dapi_work, "Gaussian Blur...", "sigma=1")            # mild smoothing
+
+# Threshold + convert to mask
+# Ensure dark background assumption; if inverted, flip the logic by inverting image first.
+IJ.setAutoThreshold(dapi_work, "{} dark".format(thr_method))
+IJ.run(dapi_work, "Convert to Mask", "")
+
+# Clean mask
+IJ.run(dapi_work, "Fill Holes", "")
+#IJ.run(dapi_work, "Open", "")  # morphological open (removes small specks)
+
+# Particle analysis -> ROIs in ROI Manager
+options = ParticleAnalyzer.ADD_TO_MANAGER | ParticleAnalyzer.EXCLUDE_EDGE_PARTICLES
+measurements = Measurements.AREA | Measurements.MEAN
+pa = ParticleAnalyzer(options, measurements, None,
+                      min_area,
+                      (max_area if max_area and max_area > 0 else float("inf")))
+                      
+ok = pa.analyze(dapi_work)
+if not ok:
+    IJ.log("ParticleAnalyzer returned False (no particles or error).")
+
+# Close all windows except the desired channel
+ids = WindowManager.getIDList()
+if ids:
+    for wid in ids:
+        imp = WindowManager.getImage(wid)
+        if imp is None:
+            continue
+        title = imp.getTitle()
+        if working_channel not in title:
+            imp.close()
